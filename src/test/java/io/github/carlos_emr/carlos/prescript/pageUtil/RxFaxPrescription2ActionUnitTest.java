@@ -858,7 +858,7 @@ class RxFaxPrescription2ActionUnitTest extends PrescriptionPdfUnitTestBase {
         MockHttpServletRequest request = createFaxRequest();
         MockHttpServletResponse response = new MockHttpServletResponse();
         stubStoredSignature();
-        when(drugDao.findDrugsAndPrescriptionsByScriptNumber(SCRIPT_ID)).thenReturn(Collections.emptyList());
+        when(drugDao.findDrugsAndPrescriptionsByScriptNumber(SCRIPT_ID, DEMOGRAPHIC_NO)).thenReturn(Collections.emptyList());
         LoggedInInfo loggedInInfo = mock(LoggedInInfo.class);
         when(loggedInInfo.getLoggedInProviderNo()).thenReturn("999998");
 

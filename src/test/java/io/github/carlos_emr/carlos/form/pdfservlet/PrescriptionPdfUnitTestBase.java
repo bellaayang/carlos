@@ -161,7 +161,7 @@ public abstract class PrescriptionPdfUnitTestBase extends CarlosUnitTestBase {
         for (Drug drug : drugs) {
             pairs.add(new Object[] {drug, prescription});
         }
-        when(drugDao.findDrugsAndPrescriptionsByScriptNumber(SCRIPT_ID)).thenReturn(pairs);
+        when(drugDao.findDrugsAndPrescriptionsByScriptNumber(SCRIPT_ID, DEMOGRAPHIC_NO)).thenReturn(pairs);
     }
 
     /**

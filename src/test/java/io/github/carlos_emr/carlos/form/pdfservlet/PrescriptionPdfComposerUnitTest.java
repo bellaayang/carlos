@@ -41,6 +41,12 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import io.github.carlos_emr.carlos.prescript.data.RxPrescriptionData;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.web.MockHttpServletResponse;
+import io.github.carlos_emr.carlos.utility.SafeEncode;
 import org.mockito.MockedStatic;
 import org.springframework.mock.web.MockHttpServletRequest;
 import java.io.File;
@@ -1081,7 +1087,7 @@ class PrescriptionPdfComposerUnitTest extends PrescriptionPdfUnitTestBase {
         request.setParameter("rxReprint", "true");
         request.setParameter("origPrintDate", "FORGED DATE");
         request.setParameter("numPrints", "77");
-        request.getSession().setAttribute("rePrint", "true");
+        startReprint(request, DEMOGRAPHIC_NO);
         stubStoredSignature();
         Prescription prescription = prescriptionDao.find(SCRIPT_ID);
         Date firstPrinted = new GregorianCalendar(2026, 0, 2).getTime();
@@ -1170,5 +1176,305 @@ class PrescriptionPdfComposerUnitTest extends PrescriptionPdfUnitTestBase {
 
             qrCodeMock.verify(() -> PrescriptionQrCodeUIBean.getPrescriptionHl7QrCodeImage(anyInt()), never());
         }
+    }
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource(nullValues = "NULL", value = {
+            "PageSize.LETTER, en, 416-555-0101, 416-555-0102, Tel: 416-555-0101 416-555-0102",
+            "PageSize.LETTER, en, NULL, 416-555-0102, Tel: 416-555-0102",
+            "PageSize.LETTER, en, '  ', NULL, NULL",
+            "PageSize.A4, fr, 416-555-0101, 416-555-0102, Téléphone: 416-555-0101 416-555-0102",
+            "PageSize.LETTER, en, WWWWWWWWWWWWWWWWWWWW, WWWWWWWWWWWWWWWWWWWW, Tel: WWWWWWWWWWWWWWWWWWWW WWWWWWWWWWWWWWWWWWWW",
+            "PageSize.A4, fr, WWWWWWWWWWWWWWWWWWWW, WWWWWWWWWWWWWWWWWWWW, Téléphone: WWWWWWWWWWWWWWWWWWWW WWWWWWWWWWWWWWWWWWWW",
+            "PageSize.A6, fr, 416-555-0101, 416-555-0102, Téléphone: 416-555-0101 416-555-0102",
+            "PageSize.HALFLETTER, en, 416-555-0101, 416-555-0102, Tel: 416-555-0101 416-555-0102"})
+    @DisplayName("should print the pharmacy phone numbers labelled in the Rx PDF, and never null")
+    void shouldPrintLabelledPharmacyPhones_inRxPdfPharmacyBlock(String paper, String language, String phone1, String phone2, String expectedTelLine,
+                                                               @TempDir Path tempDir) throws Exception {
+        // Issue #3974: the pharmacy block printed getPhone1() bare, never printed phone2, and wrote
+        // a null item when phone1 was absent. It now prints "Tel: <phone1 phone2>" or no line.
+        String previousDocumentDir = CarlosProperties.getInstance().getProperty("DOCUMENT_DIR");
+        String previousFaxFileLocation = CarlosProperties.getInstance().getProperty("fax_file_location");
+        Path documentDir = Files.createDirectory(tempDir.resolve("documents"));
+        Path faxDir = Files.createDirectory(tempDir.resolve("fax"));
+        io.github.carlos_emr.carlos.commn.model.PharmacyInfo pharmacy =
+                new io.github.carlos_emr.carlos.commn.model.PharmacyInfo();
+        pharmacy.setName("Łukasz Nguyễn Pharmacy");
+        // The no-phone case also drops the street line, so the skip of an absent field is exercised.
+        pharmacy.setAddress(expectedTelLine == null ? null : "1 Main St");
+        pharmacy.setCity(expectedTelLine == null ? null : "Toronto");
+        pharmacy.setProvince(null);
+        pharmacy.setPostalCode("  ");
+        pharmacy.setPhone1(phone1);
+        pharmacy.setPhone2(phone2);
+        pharmacy.setFax("4165551212");
+        io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao pharmacyInfoDao =
+                mock(io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao.class);
+        when(pharmacyInfoDao.getPharmacy(7)).thenReturn(pharmacy);
+        registerMock(io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao.class, pharmacyInfoDao);
+        registerMock(io.github.carlos_emr.carlos.commn.dao.DemographicPharmacyDao.class,
+                mock(io.github.carlos_emr.carlos.commn.dao.DemographicPharmacyDao.class));
+        MockHttpServletRequest request = createFaxRequest();
+        request.addParameter("pharmacyInfo", "7");
+        request.addParameter("rxPageSize", paper);
+        request.setPreferredLocales("fr".equals(language)
+                ? List.of(java.util.Locale.GERMANY, java.util.Locale.FRENCH)
+                : List.of(java.util.Locale.ENGLISH));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        stubStoredSignature();
+        stubActiveFaxConfig();
+        stubRecordDemographic();
+        boolean narrow = paper.equals("PageSize.A6") || paper.equals("PageSize.HALFLETTER");
+        if (narrow) {
+            demographicManager.getDemographic(null, DEMOGRAPHIC_NO).setAddress(
+                    "123 Long Residential Avenue Building Three Apartment Twenty Four");
+        }
+        LoggedInInfo loggedInInfo = mock(LoggedInInfo.class);
+        when(loggedInInfo.getLoggedInProviderNo()).thenReturn("999998");
+
+        try (MockedStatic<LoggedInInfo> loggedInInfoMock = mockStatic(LoggedInInfo.class);
+             MockedStatic<PrescriptionQrCodeUIBean> qrCodeMock = mockStatic(PrescriptionQrCodeUIBean.class)) {
+            loggedInInfoMock.when(() -> LoggedInInfo.getLoggedInInfoFromSession(any(HttpServletRequest.class)))
+                    .thenReturn(loggedInInfo);
+            qrCodeMock.when(() -> PrescriptionQrCodeUIBean.isPrescriptionQrCodeEnabledForProvider("999998"))
+                    .thenReturn(false);
+            CarlosProperties.getInstance().setProperty("DOCUMENT_DIR", documentDir.toString());
+            CarlosProperties.getInstance().setProperty("fax_file_location", faxDir.toString());
+
+            PrescriptionPdfComposer composer = newComposer();
+            Prescription prescription = prescriptionDao.find(SCRIPT_ID);
+            HttpServletRequest bound = composer.bindFaxContentToRecord(request, prescription);
+            byte[] pdfBytes;
+            try (var output = composer.compose(bound,
+                    composer.resolveSignatureImage(request, loggedInInfo, prescription, true), prescription)) {
+                pdfBytes = output.toByteArray();
+            }
+            String pdfText;
+            try (org.apache.pdfbox.pdmodel.PDDocument pdf = org.apache.pdfbox.Loader.loadPDF(
+                    pdfBytes)) {
+                float[] headerPositions = {Float.NaN, Float.NaN, Float.NaN, Float.NaN};
+                pdfText = new org.apache.pdfbox.text.PDFTextStripper() {
+                    @Override
+                    protected void writeString(String text, List<org.apache.pdfbox.text.TextPosition> positions)
+                            throws java.io.IOException {
+                        if (!positions.isEmpty()) {
+                            float top = (float) positions.stream().mapToDouble(
+                                    position -> position.getYDirAdj() - position.getHeightDir()).min().orElseThrow();
+                            float bottom = (float) positions.stream().mapToDouble(
+                                    org.apache.pdfbox.text.TextPosition::getYDirAdj).max().orElseThrow();
+                            if (text.contains("1234567890")) headerPositions[0] = bottom;
+                            if (text.contains("ATTENTION:")) headerPositions[1] = top;
+                            if (text.contains("4165551212")) headerPositions[2] = bottom;
+                            if (text.contains("Amoxicillin")) headerPositions[3] = top;
+                        }
+                        super.writeString(text, positions);
+                    }
+
+                    @Override
+                    protected void processTextPosition(org.apache.pdfbox.text.TextPosition text) {
+                        if (text.getDir() == 0) {
+                            assertThat(text.getXDirAdj() + text.getWidthDirAdj())
+                                    .as("glyph %s at y=%s stays inside the right page margin", text.getUnicode(), text.getYDirAdj())
+                                    .isLessThanOrEqualTo(pdf.getPage(0).getMediaBox().getWidth() - 12f);
+                        }
+                        super.processTextPosition(text);
+                    }
+                }.getText(pdf);
+                if (narrow) {
+                    for (float position : headerPositions) {
+                        assertThat(Float.isFinite(position)).as("patient, pharmacy and drug text position exists").isTrue();
+                    }
+                    assertThat(headerPositions[1]).as("pharmacy starts below the complete patient header")
+                            .isGreaterThan(headerPositions[0]);
+                    assertThat(headerPositions[3]).as("drug text starts below the complete pharmacy block")
+                            .isGreaterThan(headerPositions[2]);
+                }
+            }
+            if ("fr".equals(language)) assertThat(pdfText).doesNotContain("Tel:");
+            assertThat(pdfText).doesNotContain("Toronto,", ", ,");
+            assertThat(pdfText).contains("ATTENTION:").contains("Łukasz Nguyễn Pharmacy").contains("4165551212");
+            assertThat(pdfText).doesNotContainIgnoringCase("null");
+            String disclaimer = CarlosProperties.getInstance().getProperty("DEFAULT_FAX_COVERPAGE_COMMENT", "");
+            assertThat(pdfText.replaceAll("\\s+", " "))
+                    .contains(disclaimer.replaceAll("\\s+", " "));
+            // The prescriber heading carries its own "Tel: <clinic phone>" line, so the pharmacy
+            // assertions are on the pharmacy's numbers and on a dangling label, not on "Tel:" itself.
+            assertThat(pdfText.lines().map(String::strip)).noneMatch("Tel:"::equals);
+            if (expectedTelLine == null) {
+                assertThat(pdfText).doesNotContain("416-555-01");
+            } else {
+                // Not preceded by a word character or a dot, so an unresolved message key such as
+                // "RxPreview.msgTel: ..." cannot pass for the "Tel: ..." label.
+                assertThat(pdfText.replaceAll("\\s+", ""))
+                        .contains(expectedTelLine.replaceAll("\\s+", ""));
+                assertThat(pdfText).doesNotContain("RxPreview.msgTel");
+            }
+        } finally {
+            restoreProperty("DOCUMENT_DIR", previousDocumentDir);
+            restoreProperty("fax_file_location", previousFaxFileLocation);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PageSize.A6", "PageSize.HALFLETTER"})
+    @DisplayName("should place the narrow-page pharmacy block below a full patient heading and above the drugs")
+    void shouldPlacePharmacyBelowPatientHeading_onNarrowPaper(String paper, @TempDir Path tempDir) throws Exception {
+        // A full patient heading (date, name, DOB, address, city, phone, HIN) runs past the
+        // pharmacy block's historical fixed position on A6/half-letter; the block must follow
+        // the measured heading and the prescription body must start beneath the block.
+        String previousDocumentDir = CarlosProperties.getInstance().getProperty("DOCUMENT_DIR");
+        String previousFaxFileLocation = CarlosProperties.getInstance().getProperty("fax_file_location");
+        Path documentDir = Files.createDirectory(tempDir.resolve("documents"));
+        Path faxDir = Files.createDirectory(tempDir.resolve("fax"));
+        io.github.carlos_emr.carlos.commn.model.PharmacyInfo pharmacy =
+                new io.github.carlos_emr.carlos.commn.model.PharmacyInfo();
+        pharmacy.setName("Łukasz Nguyễn Pharmacy");
+        pharmacy.setAddress("1 Main St");
+        pharmacy.setCity("Toronto");
+        pharmacy.setProvince("ON");
+        pharmacy.setPostalCode("M1M 1M1");
+        pharmacy.setPhone1("416-555-0101");
+        pharmacy.setFax("4165551212");
+        io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao pharmacyInfoDao =
+                mock(io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao.class);
+        when(pharmacyInfoDao.getPharmacy(7)).thenReturn(pharmacy);
+        registerMock(io.github.carlos_emr.carlos.commn.dao.PharmacyInfoDao.class, pharmacyInfoDao);
+        registerMock(io.github.carlos_emr.carlos.commn.dao.DemographicPharmacyDao.class,
+                mock(io.github.carlos_emr.carlos.commn.dao.DemographicPharmacyDao.class));
+        MockHttpServletRequest request = createFaxRequest();
+        request.addParameter("pharmacyInfo", "7");
+        request.addParameter("rxPageSize", paper);
+        request.addParameter("showPatientDOB", "true");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        stubStoredSignature();
+        stubActiveFaxConfig();
+        stubRecordDemographic();
+        LoggedInInfo loggedInInfo = mock(LoggedInInfo.class);
+        when(loggedInInfo.getLoggedInProviderNo()).thenReturn("999998");
+
+        try (MockedStatic<LoggedInInfo> loggedInInfoMock = mockStatic(LoggedInInfo.class);
+             MockedStatic<PrescriptionQrCodeUIBean> qrCodeMock = mockStatic(PrescriptionQrCodeUIBean.class)) {
+            loggedInInfoMock.when(() -> LoggedInInfo.getLoggedInInfoFromSession(any(HttpServletRequest.class)))
+                    .thenReturn(loggedInInfo);
+            qrCodeMock.when(() -> PrescriptionQrCodeUIBean.isPrescriptionQrCodeEnabledForProvider("999998"))
+                    .thenReturn(false);
+            CarlosProperties.getInstance().setProperty("DOCUMENT_DIR", documentDir.toString());
+            CarlosProperties.getInstance().setProperty("fax_file_location", faxDir.toString());
+
+            PrescriptionPdfComposer composer = newComposer();
+            Prescription prescription = prescriptionDao.find(SCRIPT_ID);
+            HttpServletRequest bound = composer.bindFaxContentToRecord(request, prescription);
+            byte[] pdfBytes;
+            try (var output = composer.compose(bound,
+                    composer.resolveSignatureImage(request, loggedInInfo, prescription, true), prescription)) {
+                pdfBytes = output.toByteArray();
+            }
+            // Each run of horizontal text with its top and bottom, measured down from the page top.
+            List<Object[]> runs = new java.util.ArrayList<>();
+            try (org.apache.pdfbox.pdmodel.PDDocument pdf = org.apache.pdfbox.Loader.loadPDF(
+                    pdfBytes)) {
+                new org.apache.pdfbox.text.PDFTextStripper() {
+                    @Override
+                    protected void writeString(String text, List<org.apache.pdfbox.text.TextPosition> positions) {
+                        List<org.apache.pdfbox.text.TextPosition> horizontal =
+                                positions.stream().filter(position -> position.getDir() == 0).toList();
+                        if (!horizontal.isEmpty()) {
+                            double top = horizontal.stream().mapToDouble(p -> p.getYDirAdj() - p.getHeightDir()).min().orElseThrow();
+                            double bottom = horizontal.stream().mapToDouble(org.apache.pdfbox.text.TextPosition::getYDirAdj).max().orElseThrow();
+                            runs.add(new Object[] {text.strip(), top, bottom});
+                        }
+                    }
+                }.getText(pdf);
+            }
+            double hinBottom = bottomOf(runs, "1234567890");
+            double attentionTop = topOf(runs, "ATTENTION:");
+            double pharmacyFaxBottom = bottomOf(runs, "4165551212");
+            double drugTop = topOf(runs, "Amoxicillin 500 mg capsule");
+            assertThat(attentionTop).as("pharmacy block starts below the patient HIN line").isGreaterThan(hinBottom);
+            assertThat(drugTop).as("prescription body starts below the pharmacy block").isGreaterThan(pharmacyFaxBottom);
+        } finally {
+            restoreProperty("DOCUMENT_DIR", previousDocumentDir);
+            restoreProperty("fax_file_location", previousFaxFileLocation);
+        }
+    }
+
+    @Test
+    void shouldPreserveConfiguredSatelliteDelimiterText_whenBindingAndParsing() throws Exception {
+        String previousMultisites = (String) CarlosProperties.getInstance().get("multisites");
+        MockHttpServletRequest request = createFaxRequest();
+        stubStoredSignature();
+        stubPrescriberClinic();
+        Site site = northSite();
+        site.setName("North <br> &amp; </b> Clinic");
+        String offered = RxSatelliteClinicAddress.html("Dr A", site.getName(), site.getAddress(), site.getCity(),
+                site.getProvince(), site.getPostal(), site.getPhone(), site.getFax(), telLabel(request), faxLabel(request));
+        request.setParameter("useSC", "true");
+        request.setParameter("scAddress", offered);
+        try {
+            CarlosProperties.getInstance().setProperty("multisites", "true");
+            when(siteDao.getActiveSitesByProviderNo("999998")).thenReturn(List.of(site));
+            HttpServletRequest bound = newComposer().bindFaxContentToRecord(request);
+            assertThat(bound.getParameter("useSC")).isEqualTo("true");
+            assertThat(PrescriptionPdfComposer.parseSCAddress(bound.getParameter("scAddress")).get("clinicName"))
+                    .isEqualTo("North <br> &amp; </b> Clinic\n2 North Ave\nBarrie, ON L4M 1A1");
+        } finally {
+            restoreProperty("multisites", previousMultisites);
+        }
+    }
+
+    @Test
+    @DisplayName("should blank the reprint annotation when only another patient is being reprinted")
+    void shouldBlankReprintAnnotation_whenAnotherPatientIsReprinting() throws Exception {
+        // Reprint state is per patient (#3908): a reprint open in another patient's window must
+        // not annotate this prescription's fax.
+        MockHttpServletRequest request = createFaxRequest();
+        request.setParameter("rxReprint", "true");
+        startReprint(request, DEMOGRAPHIC_NO + 1);
+        stubStoredSignature();
+        Prescription prescription = prescriptionDao.find(SCRIPT_ID);
+        prescription.setDatePrinted(new GregorianCalendar(2026, 0, 2).getTime());
+        stubRecordDrugs(prescription, drugRow(5, RECORD_DRUG_LINE));
+
+        HttpServletRequest bound = newComposer().bindFaxContentToRecord(request);
+
+        assertThat(bound.getParameter("rxReprint")).isEqualTo("false");
+        assertThat(bound.getParameter("origPrintDate")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("should omit the reprint annotation for a different script of the same patient")
+    void shouldBlankReprintAnnotation_whenAnotherScriptIsReprinting() throws Exception {
+        MockHttpServletRequest request = createFaxRequest();
+        startReprint(request, DEMOGRAPHIC_NO);
+        io.github.carlos_emr.carlos.prescript.pageUtil.RxReprintWorkspace.find(request.getSession(), DEMOGRAPHIC_NO)
+                .bean().getStashItem(0).setScript_no(String.valueOf(SCRIPT_ID + 1));
+        stubStoredSignature();
+        Prescription prescription = prescriptionDao.find(SCRIPT_ID);
+        prescription.setDatePrinted(new GregorianCalendar(2026, 0, 2).getTime());
+        stubRecordDrugs(prescription, drugRow(5, RECORD_DRUG_LINE));
+        HttpServletRequest bound = newComposer().bindFaxContentToRecord(request);
+        assertThat(bound.getParameter("rxReprint")).isEqualTo("false");
+        assertThat(bound.getParameter("origPrintDate")).isEmpty();
+    }
+
+    private static double topOf(List<Object[]> runs, String fragment) {
+        return runs.stream().filter(run -> ((String) run[0]).contains(fragment))
+                .mapToDouble(run -> (double) run[1]).findFirst()
+                .orElseThrow(() -> new AssertionError("PDF text not found: " + fragment));
+    }
+
+    private static double bottomOf(List<Object[]> runs, String fragment) {
+        return runs.stream().filter(run -> ((String) run[0]).contains(fragment))
+                .mapToDouble(run -> (double) run[2]).findFirst()
+                .orElseThrow(() -> new AssertionError("PDF text not found: " + fragment));
+    }
+
+    private static void startReprint(MockHttpServletRequest request, int demographicNo) {
+        io.github.carlos_emr.carlos.prescript.pageUtil.RxSessionBean reprinted =
+                new io.github.carlos_emr.carlos.prescript.pageUtil.RxSessionBean();
+        reprinted.setDemographicNo(demographicNo);
+        RxPrescriptionData.Prescription row = new RxPrescriptionData.Prescription(5, "999998", demographicNo);
+        row.setScript_no(String.valueOf(SCRIPT_ID));
+        reprinted.getStashList().add(row);
+        io.github.carlos_emr.carlos.prescript.pageUtil.RxReprintWorkspace.store(request.getSession(), reprinted, "");
     }
 }
